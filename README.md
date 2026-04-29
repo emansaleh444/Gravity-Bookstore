@@ -1,7 +1,7 @@
 # 📚 Gravity Bookstore — End-to-End Data Warehouse
 
 > A complete Data Warehouse solution built on the **Gravity Bookstore** transactional database.  
-> Covers dimensional modeling, ETL, OLAP cube design, and Power BI dashboards.
+> Covers dimensional modeling (Star Schema), ETL, SSAS Cube, and Power BI dashboards.
 
 ---
 
@@ -9,7 +9,8 @@
 
 - [Project Overview](#project-overview)
 - [Source Database Analysis](#source-database-analysis)
-- [Dimensional Model (Star Schema)](#dimensional-model-star-schema)
+- [Star Schema Design](#star-schema-design)
+- [Table Definitions](#table-definitions)
 - [Project Structure](#project-structure)
 - [ETL Pipeline](#etl-pipeline)
 - [SSAS Cube Design](#ssas-cube-design)
@@ -21,179 +22,212 @@
 
 ## Project Overview
 
-This project transforms the **Gravity Bookstore** OLTP database (3NF) into a fully functional Data Warehouse using industry-standard tools and best practices.
+This project transforms the **Gravity Bookstore** OLTP database (3NF) into a fully functional Star Schema Data Warehouse using the Microsoft BI stack.
 
 | Layer | Technology |
 |---|---|
-| Source Database | SQL Server (.bak restore) |
+| Source Database | SQL Server (restored from `.bak`) |
 | Data Warehouse | SQL Server — Star Schema |
 | ETL | SSIS (SQL Server Integration Services) |
 | OLAP Cube | SSAS (SQL Server Analysis Services) |
 | Reporting | Power BI |
 
-**Business Process modeled:** Book sales — tracking what books were ordered, by which customers, when, how they were shipped, and the full lifecycle of each order.
+**Business Process modeled:** Book sales — tracking what books were ordered, by which customers, on what date, via which shipping method, and what the final order status was.
 
 ---
 
 ## Source Database Analysis
 
-### Tables in the Source (GravityBooks OLTP)
+### Source Tables (GravityBooks OLTP — 3NF)
 
-| Table | Description | Key Columns |
-|---|---|---|
-| `book` | Book catalog | `book_id`, `title`, `isbn13`, `language_id`, `publisher_id`, `num_pages`, `publication_date` |
-| `author` | Author records | `author_id`, `author_name` |
-| `book_author` | **M:N bridge** — books ↔ authors | `book_id`, `author_id` |
-| `book_language` | Languages | `language_id`, `language_code`, `language_name` |
-| `publisher` | Publishers | `publisher_id`, `publisher_name` |
-| `customer` | Customer accounts | `customer_id`, `first_name`, `last_name`, `email` |
-| `customer_address` | Customer shipping addresses | `customer_id`, `address_id`, `status_id` |
-| `address` | Physical addresses | `address_id`, `street_number`, `street_name`, `city`, `country_id` |
-| `address_status` | Current / Old status | `status_id`, `address_status` |
-| `country` | Countries | `country_id`, `country_name` |
-| `cust_order` | Order headers | `order_id`, `order_date`, `customer_id`, `shipping_method_id`, `dest_address_id` |
-| `order_line` | Order line items (one per book) | `line_id`, `order_id`, `book_id`, `price` |
-| `shipping_method` | Shipping options | `method_id`, `method_name`, `cost` |
-| `order_history` | Order status change events | `history_id`, `order_id`, `status_id`, `status_date` |
-| `order_status` | Status reference | `status_id`, `status` |
-
-### Key Relationships
-
-```
-customer ──< cust_order >── order_line >── book
-                                            │
-                                         book_author >── author
-                                            │
-                                         book_language
-                                         publisher
-
-cust_order ──< order_history >── order_status
-cust_order ──── shipping_method
-cust_order ──── address ──── country
-```
-
-### Many-to-Many: book_author
-A book can have multiple authors, and an author can write multiple books.  
-This is resolved in the DWH using a **Bridge Table** (`BridgeBookAuthor`) with a `WeightFactor` column, enabling accurate author-level sales aggregation.
+| Table | Description |
+|---|---|
+| `book` | Book catalog with title, ISBN, pages, publication date |
+| `author` | Author names |
+| `book_author` | M:N bridge — one book can have many authors |
+| `book_language` | Language codes and names |
+| `publisher` | Publisher names |
+| `customer` | Customer accounts (name, email) |
+| `customer_address` | Links customers to addresses with a status flag |
+| `address` | Street-level address details |
+| `address_status` | Current / Old address flag |
+| `country` | Country reference table |
+| `cust_order` | Order headers (date, customer, shipping method) |
+| `order_line` | Line items — one row per book per order |
+| `shipping_method` | Shipping options and their cost |
+| `order_history` | Status change events per order |
+| `order_status` | Status reference (Pending, Shipped, Delivered…) |
 
 ---
 
-## Dimensional Model (Star Schema)
+## Star Schema Design
 
-### Fact Tables
+![DWH Star Schema](docs/DWH-Schema.png)
 
-#### `fact.FactSales` — Core Sales Fact
-**Grain:** One row per order line item (one book per order).
+```
+                         ┌──────────────────────┐
+                         │       DimDate         │
+                         │──────────────────────│
+                         │ DateSK (PK)           │
+                         │ Date, Day, DaySuffix  │
+                         │ DayOfWeek, DOWInMonth │
+                         │ DayOfYear, WeekOfYear │
+                         │ WeekOfMonth           │
+                         │ Month, MonthName      │
+                         │ Quarter, QuarterName  │
+                         │ Year, StandardDate    │
+                         └───────────┬──────────┘
+                                     │ date_sk
+                                     │
+┌──────────────────┐    ┌────────────┴───────────────┐    ┌──────────────────────┐
+│    dim_book      │    │      fact_book_sales        │    │     dim_customer      │
+│──────────────────│    │────────────────────────────│    │──────────────────────│
+│ book_sk (PK) ────┼────┤ order_id_sk (PK)            ├────┤ customer_sk (PK)     │
+│ book_id          │    │ order_id  (degenerate dim)  │    │ customer_id          │
+│ title            │    │ customer_sk (FK)            │    │ first_name           │
+│ isbn13           │    │ book_sk (FK)                │    │ last_name            │
+│ num_pages        │    │ shipping_sk (FK)            │    │ email                │
+│ publication_date │    │ date_sk (FK)                │    │ address_status       │
+│ language_code    │    │ status_sk (FK)              │    │ city                 │
+│ language_name    │    │ total_price   [MEASURE]     │    │ country              │
+│ publisher_name   │    │ shipping_cost [MEASURE]     │    │ start_date           │
+│ author_name      │    │ quantity_sold [MEASURE]     │    │ end_date             │
+│ start_date       │    └────────────┬───────────────┘    │ is_current           │
+│ end_date         │                 │                    └──────────────────────┘
+│ is_current       │    ┌────────────┴──────┐
+└──────────────────┘    │                   │
+                        ▼                   ▼
+           ┌─────────────────────┐  ┌──────────────────┐
+           │    dim_shipping     │  │    dim_status     │
+           │─────────────────────│  │──────────────────│
+           │ method_sk (PK)      │  │ status_sk (PK)   │
+           │ method_id           │  │ order_status_id  │
+           │ shipping_method     │  │ order_status     │
+           │ start_date          │  └──────────────────┘
+           │ end_date            │
+           │ is_current          │
+           └─────────────────────┘
+```
+
+---
+
+## Table Definitions
+
+### ⭐ fact_book_sales
+**Grain:** One row per order line item (one book in one customer order).
 
 | Column | Type | Description |
 |---|---|---|
-| `SalesKey` | BIGINT (PK) | Surrogate key |
-| `DateKey` | INT (FK) | Order date → DimDate |
-| `CustomerKey` | INT (FK) | → DimCustomer |
-| `BookKey` | INT (FK) | → DimBook |
-| `ShippingMethodKey` | INT (FK) | → DimShippingMethod |
-| `OrderStatusKey` | INT (FK) | Latest status → DimOrderStatus |
-| `AddressKey` | INT (FK) | Shipping address → DimAddress |
-| `OrderID` | INT | Degenerate dimension |
-| `OrderLineID` | INT | Degenerate dimension |
-| `Quantity` | INT | Number of copies |
-| `UnitPrice` | DECIMAL(10,2) | Price at time of sale |
-| `LineTotal` | DECIMAL (computed) | Quantity × UnitPrice |
-| `ShippingCost` | DECIMAL(6,2) | From shipping_method |
-
-#### `fact.FactOrderHistory` — Order Status Snapshot
-**Grain:** One row per order status change event.  
-Used for order lifecycle analysis and SLA reporting.
-
-#### `fact.BridgeBookAuthor` — M:N Bridge
-Connects `DimBook` to `DimAuthor` with a `WeightFactor` for proportional author credit.
+| `order_id_sk` | INT (PK) | Surrogate key |
+| `order_id` | INT | Degenerate dimension — original order ID from source |
+| `customer_sk` | INT (FK) | → dim_customer |
+| `book_sk` | INT (FK) | → dim_book |
+| `shipping_sk` | INT (FK) | → dim_shipping |
+| `date_sk` | INT (FK) | → DimDate |
+| `status_sk` | INT (FK) | → dim_status |
+| `total_price` | DECIMAL | Line total (unit price × quantity) |
+| `shipping_cost` | DECIMAL | Shipping cost for this order |
+| `quantity_sold` | INT | Number of copies sold |
 
 ---
 
-### Dimension Tables
-
-#### `dim.DimDate`
-Auto-generated calendar from 2000–2030.
+### 📅 DimDate
+Pre-generated calendar dimension. Covers the full range of order dates.
 
 | Column | Description |
 |---|---|
-| `DateKey` | YYYYMMDD integer (PK) |
-| `FullDate` | Actual date |
-| `DayName`, `MonthName` | Human-readable labels |
-| `Quarter`, `QuarterName` | Q1–Q4 |
-| `Year`, `MonthNumber` | Numeric breakdowns |
-| `IsWeekend`, `IsHoliday` | Boolean flags |
-
-#### `dim.DimCustomer` — SCD Type 2
-Tracks historical changes. When a customer updates their name or email, the old record is expired and a new current record is inserted.
-
-| Column | Description |
-|---|---|
-| `CustomerKey` | Surrogate PK |
-| `CustomerID` | Natural key from OLTP |
-| `FullName`, `Email` | Customer details |
-| `EffectiveDate` | When this version became active |
-| `ExpirationDate` | When this version was replaced (NULL = current) |
-| `IsCurrent` | 1 = active record |
-
-#### `dim.DimBook` — SCD Type 1
-Book details overwrite on change (no history kept for book attributes).
-
-| Column | Description |
-|---|---|
-| `BookKey` | Surrogate PK |
-| `BookID` | Natural key |
-| `Title`, `ISBN13` | Book identifiers |
-| `LanguageName`, `LanguageCode` | From book_language |
-| `PublisherName` | Denormalized from publisher |
-| `NumPages`, `PublicationDate` | Book metadata |
-| `AuthorNames` | Pipe-separated list: `"Author A \| Author B"` |
-
-#### `dim.DimAuthor`
-Separate author dimension for author-level sales analysis.
-
-#### `dim.DimShippingMethod` — SCD Type 1
-| Column | Description |
-|---|---|
-| `ShippingMethodKey` | Surrogate PK |
-| `MethodName` | e.g., "Standard", "Express" |
-| `Cost` | Shipping fee |
-
-#### `dim.DimOrderStatus`
-Small reference dimension. Values: Pending, Shipped, Delivered, Cancelled, etc.
-
-#### `dim.DimAddress`
-Geographic dimension combining `address` + `country`.
+| `DateSK` | Surrogate PK — integer in YYYYMMDD format |
+| `Date` | Full date value |
+| `Day` | Day number (1–31) |
+| `DaySuffix` | Ordinal label: 1st, 2nd, 3rd… |
+| `DayOfWeek` | 1 = Sunday … 7 = Saturday |
+| `DOWInMonth` | Week-of-occurrence within the month (e.g., 2nd Monday) |
+| `DayOfYear` | Day number in the year (1–366) |
+| `WeekOfYear` | ISO week number (1–53) |
+| `WeekOfMonth` | Week number within the month |
+| `Month` | Month number (1–12) |
+| `MonthName` | January, February … December |
+| `Quarter` | 1–4 |
+| `QuarterName` | Q1, Q2, Q3, Q4 |
+| `Year` | 4-digit year |
+| `StandardDate` | Formatted display string (e.g., "January 01, 2024") |
 
 ---
 
-### Star Schema Diagram
+### 👤 dim_customer — SCD Type 2
+Tracks historical changes to customer details. When name, email, or address changes, the old record is expired and a new current record is inserted — preserving full history.
 
-```
-                        ┌─────────────┐
-                        │  DimDate    │
-                        └──────┬──────┘
-                               │
-        ┌──────────────────────┼──────────────────────┐
-        │                      │                      │
-┌───────┴──────┐    ┌──────────┴──────────┐   ┌───────┴──────┐
-│ DimCustomer  │    │     FactSales        │   │   DimBook    │
-│  (SCD2)      ├────┤  (Grain: OrderLine) ├───┤  (SCD1)      │
-└──────────────┘    │                     │   └──────┬───────┘
-                    │  Measures:          │          │
-┌──────────────┐    │  • Quantity         │   ┌──────┴───────────┐
-│DimShipping   ├────┤  • UnitPrice        │   │ BridgeBookAuthor │
-│ Method       │    │  • LineTotal        │   └──────┬───────────┘
-└──────────────┘    │  • ShippingCost     │          │
-                    │                     │   ┌──────┴───────┐
-┌──────────────┐    │  Degenerate:        │   │  DimAuthor   │
-│DimOrderStatus├────┤  • OrderID          │   └──────────────┘
-└──────────────┘    │  • OrderLineID      │
-                    └──────────┬──────────┘
-┌──────────────┐               │
-│  DimAddress  ├───────────────┘
-└──────────────┘
-```
+| Column | Description |
+|---|---|
+| `customer_sk` | Surrogate PK |
+| `customer_id` | Natural key from OLTP source |
+| `first_name` | Customer first name |
+| `last_name` | Customer last name |
+| `email` | Contact email address |
+| `address_status` | Current / Old address indicator |
+| `city` | Customer city (denormalized from address) |
+| `country` | Customer country (denormalized from address) |
+| `start_date` | Date this version became active |
+| `end_date` | Date this version was replaced (`NULL` = currently active) |
+| `is_current` | `1` = active record · `0` = historical |
+
+---
+
+### 📖 dim_book — SCD Type 2
+Tracks historical changes to book records (e.g., publisher reassignment, author corrections). Denormalizes language, publisher, and author into a single wide table.
+
+| Column | Description |
+|---|---|
+| `book_sk` | Surrogate PK |
+| `book_id` | Natural key from OLTP source |
+| `title` | Book title |
+| `isbn13` | 13-digit ISBN |
+| `num_pages` | Number of pages |
+| `publication_date` | Original publication date |
+| `language_code` | e.g., `eng`, `fre`, `ara` |
+| `language_name` | e.g., English, French, Arabic |
+| `publisher_name` | Denormalized publisher name |
+| `author_name` | Denormalized author name(s) |
+| `start_date` | SCD2 effective start date |
+| `end_date` | SCD2 expiry date (`NULL` = current) |
+| `is_current` | `1` = active · `0` = historical |
+
+---
+
+### 🚚 dim_shipping — SCD Type 2
+Tracks changes to shipping methods and pricing over time — ensures historical orders reflect the cost at the time of purchase.
+
+| Column | Description |
+|---|---|
+| `method_sk` | Surrogate PK |
+| `method_id` | Natural key from OLTP source |
+| `shipping_method` | Method name (e.g., Standard, Express, Overnight) |
+| `start_date` | SCD2 effective start date |
+| `end_date` | SCD2 expiry date (`NULL` = current) |
+| `is_current` | `1` = active · `0` = historical |
+
+---
+
+### 📦 dim_status
+Small static reference dimension for order status values. No history needed.
+
+| Column | Description |
+|---|---|
+| `status_sk` | Surrogate PK |
+| `order_status_id` | Natural key from OLTP source |
+| `order_status` | e.g., Pending, Shipped, Delivered, Cancelled |
+
+---
+
+### SCD Strategy Summary
+
+| Dimension | SCD Type | Rationale |
+|---|---|---|
+| `dim_customer` | **Type 2** | Name, email, city can change — order history must reflect who the customer was at time of purchase |
+| `dim_book` | **Type 2** | Publisher/author corrections need to be traceable historically |
+| `dim_shipping` | **Type 2** | Shipping costs change over time — historical accuracy required |
+| `dim_status` | **Type 1** | Status labels are static reference data; no history needed |
+| `DimDate` | **Static** | Pre-generated once, never changes |
 
 ---
 
@@ -205,15 +239,15 @@ gravity-bookstore-dwh/
 ├── README.md
 │
 ├── sql/
-│   ├── 01_Create_DWH_Database.sql        # Creates GravityBooks_DW database & schemas
+│   ├── 01_Create_DWH_Database.sql        # Creates GravityBooks_DW + schemas
 │   ├── 02_Create_Dimension_Tables.sql    # All DIM tables + default (-1) members
-│   ├── 03_Create_Fact_Tables.sql         # FactSales, FactOrderHistory, Bridge
-│   ├── 04_Populate_DimDate.sql           # Generates 2000–2030 calendar
-│   ├── 05_ETL_Load_Dimensions.sql        # Full ETL for all dimension tables
-│   └── 06_ETL_Load_Facts.sql             # Incremental ETL for fact tables
+│   ├── 03_Create_Fact_Tables.sql         # fact_book_sales + indexes
+│   ├── 04_Populate_DimDate.sql           # Generates calendar dimension
+│   ├── 05_ETL_Load_Dimensions.sql        # ETL for all dimension tables
+│   └── 06_ETL_Load_Facts.sql             # Incremental ETL for fact table
 │
 ├── ssis/
-│   └── GravityBooks_ETL.dtsx             # SSIS package (Visual Studio project)
+│   └── GravityBooks_ETL.dtsx             # SSIS package (Visual Studio)
 │
 ├── ssas/
 │   └── GravityBooks_Cube.bim             # SSAS tabular model definition
@@ -222,16 +256,15 @@ gravity-bookstore-dwh/
 │   └── GravityBooks_Dashboard.pbix       # Power BI report file
 │
 └── docs/
-    ├── source_schema.png                 # OLTP ERD
-    ├── star_schema.png                   # DWH star schema diagram
-    └── etl_flow.png                      # SSIS control flow diagram
+    ├── DWH-Schema.png                    # Star schema diagram (this image)
+    └── source_erd.png                    # OLTP source ERD
 ```
 
 ---
 
 ## ETL Pipeline
 
-### Run Order
+### Execution Order
 
 ```
 01_Create_DWH_Database.sql
@@ -242,152 +275,106 @@ gravity-bookstore-dwh/
         ↓
 04_Populate_DimDate.sql
         ↓
-05_ETL_Load_Dimensions.sql    ← Run BEFORE facts
+05_ETL_Load_Dimensions.sql    ← Must run before fact load
         ↓
-06_ETL_Load_Facts.sql         ← Incremental load
+06_ETL_Load_Facts.sql         ← Incremental load by order_id
 ```
 
-### SCD Strategy
-
-| Dimension | SCD Type | Logic |
-|---|---|---|
-| DimCustomer | **Type 2** | Expire old row, insert new version when name/email changes |
-| DimBook | **Type 1** | Overwrite in place (book details rarely change meaningfully) |
-| DimAuthor | **Type 1** | Overwrite |
-| DimShippingMethod | **Type 1** | Overwrite |
-| DimAddress | **Type 1** | Overwrite |
-| DimOrderStatus | **Type 1** | Overwrite |
-
-### ETL Logging
-Every ETL step writes to `dbo.ETLLog`:
-- `StepName` — which dimension or fact was loaded
-- `StartTime` / `EndTime`
-- `RowsAffected`
-- `Status` — Success / Failed
-- `ErrorMsg` — captures exception details on failure
-
-### SSIS Control Flow (described)
+### SSIS Control Flow
 
 ```
 [Execute SQL: Truncate Staging]
         ↓
-[DFT: Extract → Transform → Load DimDate]
+[DFT: Load DimDate]           — Static, one-time load
         ↓
-[DFT: Load DimCustomer]  ← SCD2 component
+[DFT: Load dim_customer]      — SCD2 component
         ↓
-[DFT: Load DimBook]      ← Lookup + Conditional Split
+[DFT: Load dim_book]          — SCD2 component
         ↓
-[DFT: Load DimAuthor]
+[DFT: Load dim_shipping]      — SCD2 component
         ↓
-[DFT: Load DimShippingMethod]
+[DFT: Load dim_status]        — Simple upsert (SCD1)
         ↓
-[DFT: Load DimOrderStatus]
-        ↓
-[DFT: Load DimAddress]
-        ↓
-[DFT: Load BridgeBookAuthor]
-        ↓
-[DFT: Load FactSales]    ← Incremental: max(OrderID)
-        ↓
-[DFT: Load FactOrderHistory]
+[DFT: Load fact_book_sales]   — Incremental: MAX(order_id_sk)
         ↓
 [Execute SQL: Update ETL Log]
 ```
+
+### SCD Type 2 — Logic per Step
+
+For `dim_customer`, `dim_book`, and `dim_shipping`:
+
+| Step | Action |
+|---|---|
+| 1 | **Lookup** existing record by natural key where `is_current = 1` |
+| 2 | **Compare** source vs current record on tracked columns |
+| 3 | **No match** → Insert new row (`is_current=1`, `start_date=today`, `end_date=NULL`) |
+| 4 | **Match + changed** → UPDATE old: `end_date=yesterday`, `is_current=0` · INSERT new version |
+| 5 | **Match + unchanged** → Skip, no action needed |
 
 ---
 
 ## SSAS Cube Design
 
-### Measure Group: Sales
+### Measures (from fact_book_sales)
 
 | Measure | Aggregation | Description |
 |---|---|---|
-| Total Revenue | SUM(LineTotal) | Sum of all line totals |
-| Total Orders | COUNT DISTINCT(OrderID) | Unique orders |
-| Total Units Sold | SUM(Quantity) | Books sold |
-| Avg Order Value | Total Revenue / Total Orders | Average basket size |
-| Avg Unit Price | AVG(UnitPrice) | Average selling price |
-| Total Shipping Cost | SUM(ShippingCost) | Shipping revenue |
+| Total Revenue | SUM(`total_price`) | Total sales revenue |
+| Total Shipping Cost | SUM(`shipping_cost`) | Total shipping fees collected |
+| Total Units Sold | SUM(`quantity_sold`) | Total books sold |
+| Total Orders | COUNT DISTINCT(`order_id`) | Unique orders placed |
+| Avg Order Value | Revenue ÷ Orders | Average basket size |
+| Avg Units per Order | Units ÷ Orders | Average books per order |
 
-### Dimensions & Hierarchies
+### Dimension Hierarchies
 
-**DimDate**
-```
-Year → Quarter → Month → Date
-```
-
-**DimCustomer**
-```
-Customer Name (leaf level)
-```
-
-**DimBook**
-```
-Publisher → Book Title
-Language → Book Title
-```
-
-**DimAuthor**
-```
-Author Name (via BridgeBookAuthor)
-```
-
-**DimAddress (Geography)**
-```
-Country → City
-```
-
-**DimShippingMethod**
-```
-Method Name (leaf)
-```
-
-**DimOrderStatus**
-```
-Status Value (leaf)
-```
-
-### Cube Relationships
-- `FactSales` → all dimensions: **Regular** relationships
-- `FactSales` → `DimAuthor` (via `BridgeBookAuthor`): **Many-to-Many** relationship
+| Dimension | Hierarchy |
+|---|---|
+| DimDate | Year → Quarter → Month → Date |
+| dim_customer | Country → City → Customer Name |
+| dim_book | Publisher → Book Title |
+| dim_shipping | Shipping Method (leaf) |
+| dim_status | Order Status (leaf) |
 
 ---
 
 ## Power BI Dashboards
 
 ### Page 1 — Sales Overview
-- **KPI Cards:** Total Revenue · Total Orders · Total Books Sold · Avg Order Value
-- **Line Chart:** Monthly Revenue Trend (Year-over-Year comparison)
+- **KPI Cards:** Total Revenue · Total Orders · Units Sold · Avg Order Value
+- **Line Chart:** Monthly revenue trend with Year-over-Year comparison
 - **Bar Chart:** Revenue by Quarter
-- **Slicer:** Year, Country, Shipping Method
+- **Slicers:** Year · Country · Shipping Method · Order Status
 
-### Page 2 — Book & Author Performance
+### Page 2 — Book Performance
 - **Table:** Top 20 Books by Revenue
-- **Bar Chart:** Top 10 Authors by Sales (using bridge table weight)
-- **Treemap:** Revenue by Publisher
+- **Bar Chart:** Top 10 Authors by Sales
+- **Treemap:** Revenue breakdown by Publisher
 - **Donut Chart:** Sales split by Language
 
 ### Page 3 — Customer Analysis
 - **Map Visual:** Orders by Country
 - **Bar Chart:** Top 10 Customers by Lifetime Value
 - **Line Chart:** New vs Returning customers over time
-- **Table:** Customer order history (drill-through enabled)
+- **Drill-through Table:** Customer order history
 
-### Page 4 — Shipping & Operations
+### Page 4 — Shipping & Order Status
 - **Bar Chart:** Orders by Shipping Method
 - **Stacked Bar:** Order Status distribution by Month
-- **Line Chart:** Average days to fulfillment (from order date to Delivered status)
-- **Funnel:** Order status flow (Pending → Shipped → Delivered)
+- **Funnel:** Order lifecycle (Pending → Shipped → Delivered)
+- **KPI:** Percentage of orders successfully delivered
 
 ---
 
 ## How to Run
 
 ### Prerequisites
+
 - SQL Server 2019+ (Developer or Standard Edition)
-- SQL Server Management Studio (SSMS)
-- Visual Studio 2019+ with SSIS / SSAS extensions *(for cube and SSIS)*
-- Power BI Desktop *(for dashboard)*
+- SQL Server Management Studio (SSMS 18+)
+- Visual Studio 2019+ with SSIS & SSAS extensions installed
+- Power BI Desktop (latest version)
 
 ### Step 1 — Restore the Source Database
 
@@ -402,34 +389,32 @@ WITH
 
 ### Step 2 — Build the Data Warehouse
 
-Run the SQL scripts in order from SSMS:
+Open SSMS and run the scripts in order:
 
-```bash
-01_Create_DWH_Database.sql
-02_Create_Dimension_Tables.sql
-03_Create_Fact_Tables.sql
-04_Populate_DimDate.sql
-05_ETL_Load_Dimensions.sql
-06_ETL_Load_Facts.sql
+```
+01 → 02 → 03 → 04 → 05 → 06
 ```
 
-### Step 3 — Deploy the SSIS Package
+### Step 3 — Deploy SSIS Package
+
 1. Open `ssis/GravityBooks_ETL.dtsx` in Visual Studio
-2. Update connection strings in `Connection Managers` to point to your server
-3. Right-click the project → **Deploy**
-4. Schedule via SQL Server Agent for nightly refresh
+2. Update **Connection Managers** with your server name
+3. Right-click project → **Deploy**
+4. Schedule nightly via **SQL Server Agent**
 
-### Step 4 — Deploy the SSAS Cube
+### Step 4 — Deploy SSAS Cube
+
 1. Open `ssas/GravityBooks_Cube.bim` in Visual Studio
-2. Set the data source to `GravityBooks_DW`
+2. Set data source to `GravityBooks_DW`
 3. **Build → Deploy**
-4. Process the cube (Process Full)
+4. Run **Process Full** to load the cube
 
-### Step 5 — Open Power BI Dashboard
+### Step 5 — Open Power BI Report
+
 1. Open `powerbi/GravityBooks_Dashboard.pbix` in Power BI Desktop
-2. Update the data source to your `GravityBooks_DW` server
-3. Refresh the dataset
-4. Optionally publish to Power BI Service
+2. Update data source to your `GravityBooks_DW` server
+3. Click **Refresh All**
+4. Optionally **Publish** to Power BI Service for sharing
 
 ---
 
@@ -442,13 +427,4 @@ Run the SQL scripts in order from SSMS:
 
 ---
 
-## Author
-
-Built as a graduation project demonstrating end-to-end Data Warehouse engineering on a real-world bookstore transactional database.
-
----
-
-*Star this repo ⭐ if it helped you understand Data Warehouse design!*
-
-
-
+*Built as a graduation Data Warehouse project — full Star Schema design on a real-world bookstore OLTP database.*
